@@ -1,0 +1,956 @@
+// ============================================================================
+// ElimiExpo — Prisma Schema (Phase 0 — FOR REVIEW)
+// ============================================================================
+// This file encodes every decision made during planning. Read the comments —
+// they explain *why* a field/table exists, not just what it is, since several
+// of these decisions are not obvious from the field names alone.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+// Extensible role names. Adding a new one is a migration, but the Role TABLE
+// (below) is what actually drives permissions — UserType is just the label.
+enum UserType {
+  Super_Admin
+  Observer_Admin // read-only oversight role for organizers
+  National_Admin
+  National_Moderator
+  National_Assessor
+  Zonal_Admin
+  Zonal_Moderator
+  Zonal_Assessor
+  State_Assessor  // scores individual entries within their assigned state
+  State_Moderator // reviews disputes at state level within their assigned state
+  Trainee
+  TSP // Training Service Provider
+  Technical_College
+  Instructor
+  Industry_Partner
+}
+
+// Whether a role's authority/scope is state-limited, zone-limited, national, or overall.
+enum RoleScope {
+  State   // scoped to one specific state (State_Assessor, State_Moderator)
+  Zonal   // scoped to one zone (Zonal_Admin, Zonal_Assessor, Zonal_Moderator)
+  National
+  Overall
+}
+
+// The 5 public-facing registrant categories (kept separate from UserType's
+// staff roles so applicant-category logic doesn't get tangled with staff
+// permission logic).
+enum ApplicantCategory {
+  Trainee
+  TSP
+  Technical_College
+  Instructor
+  Industry_Partner
+}
+
+enum Gender {
+  Male
+  Female
+}
+
+enum EvidenceTypeEnum {
+  Certificates
+  Portfolios
+  Employment_Records
+  Business_Registration_Documents
+  Business_Performance_Records
+  Project_Photographs
+  Videos
+  References
+  Testimonials
+}
+
+// Where a Criterion (question) applies.
+enum CriterionScope {
+  Global_AllTrades // applies to every trade, every sector — truly universal
+  Global_PerSector // applies to all 10 sectors, but evaluated at sector level
+  Sector_Wide // applies to every trade under ONE specific sector
+  Trade_Specific // applies to exactly one trade
+}
+
+// Which assessment level a Criterion is usable at.
+// State_Only: only usable by State Assessors scoring individual entries.
+// Zonal_Only: only usable by Zonal Assessors re-scoring promoted entries.
+// National_Only: only usable at the national finals stage.
+// Nationwide: valid at ALL three levels.
+enum CriterionLevel {
+  State_Only
+  Zonal_Only
+  National_Only
+  Nationwide // valid at state, zonal, and national stages
+}
+
+// A Criterion can be independently locked per (cycle, level) — see
+// CriterionLock below. This enum just labels intent on the Criterion record
+// itself for admin UI clarity; the actual enforcement lives in CriterionLock.
+enum CriterionStatus {
+  Draft // not yet usable, admin still configuring
+  Active
+  Retired // soft-deleted, kept for historical integrity
+}
+
+enum CompetitionCycleStatus {
+  Draft // being configured, not visible publicly
+  Open // registration open, "competition open" banner shows
+  Registration_Closed // registrations closed but assessment ongoing
+  Zonal_Locked // zonal scoring locked, promotion to national in progress/done
+  National_Locked // national scoring locked, results final
+  Archived // fully closed, historical record only
+}
+
+enum AssessmentStage {
+  State
+  Zonal
+  National
+}
+
+// Assessment levels - matches the three-tier competition structure.
+// State: individual entries being scored by State Assessors within a state.
+// Zonal: promoted state entries being re-scored by Zonal Assessors within a zone.
+// National: promoted zonal entries being scored by National Assessors.
+enum AssessmentLevel {
+  State
+  Zonal
+  National
+}
+
+// Per (cycle, level, [sector]) lock — independent of CompetitionCycleStatus
+// so the super admin can lock e.g. just zonal scoring for Sector X while
+// everything else stays open.
+enum LockState {
+  Open
+  Locked
+}
+
+enum ModerationCaseStatus {
+  Open
+  Under_Review
+  Resolved_Upheld // original score upheld
+  Resolved_Overturned // original score changed
+  Dismissed
+}
+
+enum AwardEntityType {
+  Trainee
+  TSP
+  Technical_College
+  Instructor
+  Industry_Partner
+  Cross_Category // category depends on combination of entity types
+}
+
+enum AuditAction {
+  SCORE_SUBMITTED
+  SCORE_EDITED
+  COMMENT_ADDED
+  MODERATION_OPENED
+  MODERATION_RESOLVED
+  CRITERION_LOCKED
+  CRITERION_UNLOCKED
+  PROMOTION_RUN
+  CYCLE_STATUS_CHANGED
+  ROLE_GRANTED
+  ROLE_REVOKED
+  REGISTRATION_CODE_RESET
+  AWARD_RESULT_ASSIGNED
+  SECTOR_DISABLED
+  SECTOR_ENABLED
+}
+
+// What kind of record a notification deep-links to. The notification UI
+// uses this to build the correct route (e.g. Panel_Assignment ->
+// /dashboard/assessor/entries/{linkId}).
+enum NotificationLinkType {
+  Panel_Assignment // -> TradeEntryPanel.id
+  State_Trade_Entry // -> StateTradeEntry.id
+  Moderation_Case // -> ModerationCase.id
+  Sector_Result // -> SectorResult.id
+  Award_Result // -> AwardResult.id
+  Staff_Registration // -> User.id (pending appointment)
+  Role_Change // -> UserRole.id
+  Criterion_Lock // -> CriterionLock.id
+  Conversation // -> Conversation.id
+}
+
+enum NotificationType {
+  PANEL_ASSIGNED // assessor notified they've been put on a panel, incl. deadline
+  SCORE_SUBMITTED // zonal admin notified an assessor gave a verdict
+  PANEL_COMPLETED // all 3 assessors done — zonal admin + applicant notified
+  PANEL_ASSIGNMENT_OVERDUE // assessor (and their zonal admin) notified a deadline was missed
+  MODERATION_OPENED
+  MODERATION_RESOLVED
+  PROMOTION_OCCURRED // applicant/zonal-admin notified their sector entry advanced a stage
+  CRITERION_LOCK_CHANGED
+  STAFF_PENDING_APPOINTMENT
+  ROLE_CHANGED
+  AWARD_ASSIGNED
+  NEW_MESSAGE // someone received a message/broadcast — see Conversation models below
+}
+
+// Whether a Conversation is a direct 1-to-1 thread or a targeted/broadcast
+// announcement sent to a group. Both support replies — a broadcast reply
+// just becomes a 1-to-1 side-thread between the replier and the original
+// sender, rather than fanning out to the whole original audience.
+enum ConversationKind {
+  Direct
+  Broadcast
+}
+
+// Who a Broadcast conversation was targeted at, for filtering/audit
+// purposes (e.g. "all Trainees in my zone" vs "everyone nationally").
+// Direct conversations don't use this — it's null for those.
+enum BroadcastTargetType {
+  Everyone // Super_Admin/National_Admin only
+  Specific_Role // e.g. all Zonal_Admin, all Trainee
+  Specific_Zone // a whole zone's applicants/staff
+  Specific_Role_In_Zone // e.g. all Zonal_Assessors within one zone
+}
+
+// ============================================================================
+// GEOGRAPHY
+// ============================================================================
+
+model Zone {
+  id        String   @id @default(cuid()) @db.VarChar(36)
+  name      String   @unique @db.VarChar(100) // e.g. "North Central"
+  states    State[]
+  userRoles UserRole[]
+  sectorResults SectorResult[]
+  pendingStaff  User[]   @relation("IntendedZone")
+  broadcastsTargeted Conversation[] @relation("BroadcastTargetZone")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model State {
+  id     String @id @default(cuid()) @db.VarChar(36)
+  name   String @unique @db.VarChar(100)
+  zoneId String @db.VarChar(36)
+  zone   Zone   @relation(fields: [zoneId], references: [id])
+
+  applicants        User[]
+  stateTradeEntries StateTradeEntry[]
+  sectorResults     SectorResult[]
+  userRoles         UserRole[]        @relation("UserRoleState")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([zoneId])
+}
+
+// ============================================================================
+// IDENTITY & ACCESS
+// ============================================================================
+
+// Single user table for EVERYONE — staff and applicants alike. This keeps
+// "email cannot belong to any other category" trivially enforceable via one
+// unique constraint, and keeps auth logic in one place.
+model User {
+  id           String  @id @default(cuid()) @db.VarChar(36)
+  email        String  @unique @db.VarChar(255)
+  passwordHash String  @db.VarChar(255)
+  isActive     Boolean @default(true)
+
+  // --- Identity fields shared across all categories ---
+  // Org name OR first+last, per category rules (enforced in Zod, not DB,
+  // since the rule depends on `applicantCategory`).
+  organizationName String? @db.VarChar(255)
+  firstName        String? @db.VarChar(100)
+  lastName         String? @db.VarChar(100)
+
+  gender  Gender? // required for individual-based categories (Trainee, Instructor); enforced in Zod
+  phone   String? @db.VarChar(30)
+  address String? @db.VarChar(500)
+
+  country String @default("Nigeria") @db.VarChar(100)
+  stateId String? @db.VarChar(36)
+  state   State?  @relation(fields: [stateId], references: [id])
+  // zoneId is intentionally NOT stored directly — it's derived from state.zone
+  // to avoid the two ever going out of sync. Queries join through State.
+
+  // --- Applicant-specific (null for staff users) ---
+  applicantCategory ApplicantCategory?
+  cycleId           String?             @db.VarChar(36) // which competition year this applicant registered under
+  cycle             CompetitionCycle?   @relation(fields: [cycleId], references: [id])
+  tradeId           String?             @db.VarChar(36) // Trainees + Instructors register under a trade
+  trade             Trade?              @relation(fields: [tradeId], references: [id])
+
+  // --- Staff-specific ---
+  // The registration code entered at staff sign-up time, kept for audit
+  // purposes (was it the active code at the time, even if reset since).
+  usedRegistrationCodeId String?            @db.VarChar(36)
+  usedRegistrationCode   RegistrationCode?  @relation(fields: [usedRegistrationCodeId], references: [id])
+  // The zone a staff registrant indicated at sign-up, BEFORE any role is
+  // granted. This is what lets a Zonal_Admin find pending registrants for
+  // their own zone to review/appoint. Once a UserRole is granted, the
+  // authoritative zone lives on UserRole.zoneId instead — this field is
+  // only the pre-appointment intent.
+  intendedZoneId         String?            @db.VarChar(36)
+  intendedZone           Zone?              @relation("IntendedZone", fields: [intendedZoneId], references: [id])
+  appointedById          String?            @db.VarChar(36) // which admin appointed this assessor/moderator
+  appointedBy            User?              @relation("Appointments", fields: [appointedById], references: [id])
+  appointees             User[]             @relation("Appointments")
+
+  roles UserRole[]
+
+  // Relations as the actor in scoring/moderation/audit
+  scoresGiven       Score[]            @relation("ScoreAssessor")
+  moderationsActed  ModerationCase[]   @relation("ModeratorActor")
+  moderationsRaised ModerationCase[]   @relation("ModerationRaisedBy")
+  promotionsRun     Promotion[]        @relation("PromotionActor")
+  awardsAssigned    AwardResult[]      @relation("AwardAssignedBy")
+  auditLogs         AuditLog[]         @relation("AuditActor")
+  assessorOnEntries TradeEntryPanel[]  @relation("PanelAssessor")
+  panelAssignmentsMade TradeEntryPanel[] @relation("PanelAssignedBy")
+  entriesAsApplicant StateTradeEntry[] @relation("EntryApplicant")
+  notifications     Notification[]     @relation("NotificationRecipient")
+  conversationsIn    ConversationParticipant[] @relation("ConversationParticipant")
+  messagesSent       Message[]                 @relation("MessageSender")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([applicantCategory])
+  @@index([cycleId])
+  @@index([tradeId])
+  @@index([stateId])
+}
+
+// Extensible role table, per your sketch — name + scope, joined to User
+// via UserRole so a user could (in theory) hold more than one role, and so
+// granting/revoking is a row operation, not a column flag.
+model Role {
+  id        String    @id @default(cuid()) @db.VarChar(36)
+  name      UserType  @default(Trainee)
+  scope     RoleScope @default(Zonal)
+  // Capability flags used by the API permission layer — this is what
+  // actually makes Observer_Admin "see everything, change nothing" rather
+  // than that being hardcoded by role name in every single endpoint.
+  canCreate Boolean   @default(true)
+  canEdit   Boolean   @default(true)
+  canDelete Boolean   @default(true)
+
+  userRoles UserRole[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name, scope])
+}
+
+model UserRole {
+  id     String @id @default(cuid()) @db.VarChar(36)
+  userId String @db.VarChar(36)
+  user   User   @relation(fields: [userId], references: [id])
+  roleId String @db.VarChar(36)
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  // Zone scoping for zonal-level roles (Zonal_Admin, Zonal_Assessor,
+  // Zonal_Moderator are tied to ONE zone each).
+  zoneId String? @db.VarChar(36)
+  zone   Zone?   @relation(fields: [zoneId], references: [id])
+
+  // State scoping for state-level roles (State_Assessor, State_Moderator
+  // are tied to one specific state within a zone). When stateId is set,
+  // zoneId should ALSO be set (derived from state.zoneId) so that the
+  // Zonal_Admin who manages this state can find these role grants through
+  // zone-scoped queries without needing to join through State every time.
+  stateId String? @db.VarChar(36)
+  state   State?  @relation("UserRoleState", fields: [stateId], references: [id])
+
+  grantedAt DateTime  @default(now())
+  revokedAt DateTime? // null = currently active. Kept instead of deleting,
+  // so "who held this role and when" is always answerable (audit need).
+
+  // UNIQUENESS IS APP-ENFORCED, NOT DB-ENFORCED, for two compounding reasons:
+  //   1. The real rule is "one ACTIVE (revokedAt IS NULL) grant per
+  //      (userId, roleId, zoneId)" — a flat composite unique can't express
+  //      revokedAt-conditional uniqueness, so re-granting a previously
+  //      revoked role must always be possible and must create a new row.
+  //   2. Separately, MySQL unique indexes treat every NULL as distinct, so
+  //      even ignoring (1), this constraint would not dedupe zone-less
+  //      roles (Super_Admin, National_Admin) where zoneId = NULL.
+  // See src/server/services/roles.ts (grantRole) for the actual
+  // check-then-create logic. This @@unique below is kept only as a
+  // best-effort guard against the most common accidental duplicate
+  // (re-running a non-null-zone grant twice in immediate succession), not
+  // as the source of truth.
+  @@unique([userId, roleId, zoneId])
+  @@index([userId])
+  @@index([roleId])
+}
+
+// Super-admin-generated code gating the unlisted staff registration page.
+// Resettable — old codes are kept (not deleted) so we know which code was
+// active at the time any given staff member registered.
+model RegistrationCode {
+  id        String    @id @default(cuid()) @db.VarChar(36)
+  code      String    @unique @db.VarChar(50)
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  retiredAt DateTime?
+
+  registrants User[]
+}
+
+// ============================================================================
+// COMPETITION CYCLE (the "year" concept)
+// ============================================================================
+
+model CompetitionCycle {
+  id     String                 @id @default(cuid()) @db.VarChar(36)
+  year   Int                    @unique // e.g. 2026 — one cycle per year
+  title  String                 @db.VarChar(255) // e.g. "ElimiExpo 2026 Skills Excellence Awards"
+  status CompetitionCycleStatus @default(Draft)
+
+  registrationOpensAt  DateTime?
+  registrationClosesAt DateTime?
+
+  applicants     User[]
+  sectorOfferings CycleSectorOffering[]
+  criteria        Criterion[]
+  stateTradeEntries StateTradeEntry[]
+  promotions      Promotion[]
+  awardResults    AwardResult[]
+  locks           CriterionLock[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Which sectors are enabled for a given cycle/year. A Sector can exist
+// permanently in the master list but be excluded for a specific year.
+model CycleSectorOffering {
+  id       String            @id @default(cuid()) @db.VarChar(36)
+  cycleId  String            @db.VarChar(36)
+  cycle    CompetitionCycle  @relation(fields: [cycleId], references: [id])
+  sectorId String            @db.VarChar(36)
+  sector   Sector            @relation(fields: [sectorId], references: [id])
+  enabled  Boolean           @default(true)
+
+  @@unique([cycleId, sectorId])
+  @@index([sectorId])
+}
+
+// ============================================================================
+// TAXONOMY — Sector / Trade (super-admin managed, expandable)
+// ============================================================================
+
+model Sector {
+  id       String  @id @default(cuid()) @db.VarChar(36)
+  name     String  @unique @db.VarChar(150)
+  disabled Boolean @default(false) // suspend from competition without deleting history
+
+  // Which applicant categories this sector applies to. Empty/omitted =
+  // applies to all categories by default (enforced in app logic: an empty
+  // join here is read as "all").
+  applicableCategories SectorApplicantCategory[]
+
+  trades            Trade[]
+  criteria          Criterion[]
+  cycleOfferings    CycleSectorOffering[]
+  stateTradeEntries StateTradeEntry[]
+  sectorResults     SectorResult[]
+  criterionLocks    CriterionLock[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SectorApplicantCategory {
+  id       String            @id @default(cuid()) @db.VarChar(36)
+  sectorId String            @db.VarChar(36)
+  sector   Sector            @relation(fields: [sectorId], references: [id])
+  category ApplicantCategory
+
+  @@unique([sectorId, category])
+}
+
+model Trade {
+  id       String  @id @default(cuid()) @db.VarChar(36)
+  name     String  @db.VarChar(150)
+  sectorId String  @db.VarChar(36)
+  sector   Sector  @relation(fields: [sectorId], references: [id])
+  disabled Boolean @default(false)
+
+  registrants       User[]
+  criteria          Criterion[]
+  stateTradeEntries StateTradeEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sectorId, name])
+  @@index([sectorId])
+}
+
+// ============================================================================
+// EVIDENCE TYPES
+// ============================================================================
+
+model EvidenceType {
+  id   String           @id @default(cuid()) @db.VarChar(36)
+  name EvidenceTypeEnum @unique
+
+  criteria CriterionEvidenceType[]
+}
+
+// ============================================================================
+// CRITERIA (admin-authored questions/requirements)
+// ============================================================================
+
+model Criterion {
+  id          String          @id @default(cuid()) @db.VarChar(36)
+  cycleId     String          @db.VarChar(36) // tied to a year — prevents cross-year reuse/boosting
+  cycle       CompetitionCycle @relation(fields: [cycleId], references: [id])
+  text        String          @db.Text // the question/requirement itself
+  maxScore    Decimal         @db.Decimal(6, 2)
+  scope       CriterionScope
+  level       CriterionLevel  @default(Nationwide)
+  status      CriterionStatus @default(Draft)
+
+  // Nullable — only populated depending on `scope`:
+  //   Global_AllTrades -> both null
+  //   Global_PerSector -> both null (applies to all sectors generically)
+  //   Sector_Wide      -> sectorId set, tradeId null
+  //   Trade_Specific   -> sectorId AND tradeId set
+  sectorId String? @db.VarChar(36)
+  sector   Sector? @relation(fields: [sectorId], references: [id])
+  tradeId  String? @db.VarChar(36)
+  trade    Trade?  @relation(fields: [tradeId], references: [id])
+
+  allowedEvidenceTypes CriterionEvidenceType[]
+  scores               Score[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([cycleId])
+  @@index([sectorId])
+  @@index([tradeId])
+}
+
+model CriterionEvidenceType {
+  id             String       @id @default(cuid()) @db.VarChar(36)
+  criterionId    String       @db.VarChar(36)
+  criterion      Criterion    @relation(fields: [criterionId], references: [id])
+  evidenceTypeId String       @db.VarChar(36)
+  evidenceType   EvidenceType @relation(fields: [evidenceTypeId], references: [id])
+
+  @@unique([criterionId, evidenceTypeId])
+}
+
+// Independent lock per (cycle, level, optional sector). Lets super admin
+// lock e.g. "2026 / Zonal / all sectors" in one action, OR lock just one
+// sector's zonal criteria if there's a specific dispute. sectorId = null
+// means "applies to the whole level" for that cycle.
+model CriterionLock {
+  id       String          @id @default(cuid()) @db.VarChar(36)
+  cycleId  String          @db.VarChar(36)
+  cycle    CompetitionCycle @relation(fields: [cycleId], references: [id])
+  level    AssessmentLevel
+
+  // sectorId is nullable for the RELATION (a whole-level lock has no real
+  // sector to point at), but sectorScopeKey is NEVER null — it's either a
+  // real Sector.id or the literal string "ALL_SECTORS". This sidesteps
+  // MySQL's unique-index behavior where every NULL is treated as distinct
+  // (so @@unique([cycleId, level, sectorId]) would silently allow multiple
+  // "whole level" lock rows for the same cycle+level). The unique
+  // constraint below is built on sectorScopeKey instead, which is always
+  // a real, comparable value.
+  sectorId       String? @db.VarChar(36)
+  sector         Sector? @relation(fields: [sectorId], references: [id])
+  sectorScopeKey String  @default("ALL_SECTORS") @db.VarChar(36)
+
+  state LockState @default(Open)
+
+  lockedById String? @db.VarChar(36)
+  lockedAt   DateTime?
+  unlockedAt DateTime?
+
+  @@unique([cycleId, level, sectorScopeKey])
+}
+
+// ============================================================================
+// STATE TRADE ENTRY — exactly 3 trades representing a sector, per state
+// ============================================================================
+
+// This is the object the system validates: enforces EXACTLY 3 trades per
+// (cycle, sector, state). Which 3 trades is decided OFFLINE — the platform
+// only records what was submitted and rejects a 4th.
+model StateTradeEntry {
+  id       String           @id @default(cuid()) @db.VarChar(36)
+  cycleId  String           @db.VarChar(36)
+  cycle    CompetitionCycle @relation(fields: [cycleId], references: [id])
+  sectorId String           @db.VarChar(36)
+  sector   Sector           @relation(fields: [sectorId], references: [id])
+  stateId  String           @db.VarChar(36)
+  state    State            @relation(fields: [stateId], references: [id])
+  tradeId  String           @db.VarChar(36)
+  trade    Trade            @relation(fields: [tradeId], references: [id])
+
+  // THE APPLICANT BEING ASSESSED. This is what makes a StateTradeEntry a
+  // named individual's/entity's performance record — not an abstract
+  // trade-level aggregate. Awards ("Outstanding Building & Construction
+  // Trainee", "Best Instructor") are given to a PERSON/ORG, and public
+  // results must show WHO is leading, not just a sector total — so every
+  // entry now points at exactly one applicant. Multiple applicants CAN
+  // register under the same trade+state (e.g. 5 trainees doing
+  // Bricklaying in Lagos) — each gets their OWN StateTradeEntry. The
+  // "exactly 3 TRADES per sector per state" rule still applies, but is
+  // now enforced on DISTINCT tradeId values, not on entry count — see
+  // the entries-creation route.
+  applicantId String @db.VarChar(36)
+  applicant   User   @relation("EntryApplicant", fields: [applicantId], references: [id])
+
+  panel  TradeEntryPanel[] // exactly 3 assessors assigned here
+  scores Score[]
+
+  // Tracks which assessment LEVEL this trade entry is CURRENTLY being
+  // scored at. Starts at State — individual entries are first scored by
+  // State Assessors within their state. Flips to Zonal when the sector
+  // total is promoted State->Zonal (unlocking Zonal_Only/Nationwide
+  // criteria for Zonal Assessors to re-score), then to National on
+  // Zonal->National promotion. The SAME applicant's entry carries
+  // forward through each promotion — they are literally the person
+  // being re-scored at the next stage, not a fresh abstraction.
+  currentLevel AssessmentLevel @default(State)
+
+  // Computed/cached once assessment completes (avoids recomputing on every
+  // read of a leaderboard with potentially hundreds of rows).
+  tradeTotal   Decimal? @db.Decimal(8, 2)
+  tradeAverage Decimal? @db.Decimal(8, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Multiple applicants can share the same (cycle, sector, state, trade)
+  // — the uniqueness is now per APPLICANT, not per trade. The "exactly 3
+  // distinct trades" rule is enforced at the application layer (see
+  // entries-creation route), since SQL can't cap a distinct-value count
+  // declaratively.
+  @@unique([cycleId, sectorId, stateId, tradeId, applicantId])
+  @@index([cycleId, sectorId, stateId])
+  @@index([applicantId])
+}
+
+// Exactly 3 assessors per StateTradeEntry, assigned by the zonal admin.
+model TradeEntryPanel {
+  id                String          @id @default(cuid()) @db.VarChar(36)
+  stateTradeEntryId String          @db.VarChar(36)
+  stateTradeEntry   StateTradeEntry @relation(fields: [stateTradeEntryId], references: [id])
+  assessorId        String          @db.VarChar(36)
+  assessor          User            @relation("PanelAssessor", fields: [assessorId], references: [id])
+  assignedById      String          @db.VarChar(36) // the admin who made this assignment
+  assignedBy        User            @relation("PanelAssignedBy", fields: [assignedById], references: [id])
+  assignedAt        DateTime        @default(now())
+
+  // WHICH STAGE this panel assignment is for. An entry gets a FRESH panel
+  // (new assessors, matching the role for that stage — State_Assessor,
+  // Zonal_Assessor, or National_Assessor) at EACH stage it's promoted to.
+  // Without this field, the system could only ever assign one panel per
+  // entry for its whole lifetime — meaning nobody could ever be assigned
+  // to score it again after a State->Zonal promotion. This is what makes
+  // re-assignment at each new stage possible.
+  level AssessmentLevel
+
+  // Deadline for this assessor to submit their scores for this entry.
+  // Set by the assigning admin. Drives the "overdue" flag in dashboards
+  // and notification escalation — assessors who blow past this without
+  // submitting should surface prominently to their Zonal_Admin.
+  dueAt       DateTime
+  completedAt DateTime? // set when this assessor has submitted scores for every applicable criterion
+
+  // Same assessor could in principle be assigned again at a DIFFERENT
+  // stage (unusual, but not forbidden) — so uniqueness is per (entry,
+  // assessor, level), not just (entry, assessor).
+  @@unique([stateTradeEntryId, assessorId, level])
+  @@index([stateTradeEntryId, level])
+}
+
+// ============================================================================
+// SCORING
+// ============================================================================
+
+// One row per (assessor, criterion, trade entry). The 3 assessors' scores
+// per criterion are averaged at read/aggregation time (see SectorResult).
+model Score {
+  id                String          @id @default(cuid()) @db.VarChar(36)
+  stateTradeEntryId String          @db.VarChar(36)
+  stateTradeEntry   StateTradeEntry @relation(fields: [stateTradeEntryId], references: [id])
+  criterionId       String          @db.VarChar(36)
+  criterion         Criterion       @relation(fields: [criterionId], references: [id])
+  assessorId        String          @db.VarChar(36)
+  assessor          User            @relation("ScoreAssessor", fields: [assessorId], references: [id])
+
+  value   Decimal @db.Decimal(6, 2)
+  comment String? @db.Text // optional rationale, visible to moderators/higher levels
+
+  // What evidence was *observed offline* — described, not uploaded, by
+  // default. evidenceUrl stays optional for anyone who DOES submit online.
+  evidenceTypeObserved EvidenceTypeEnum?
+  evidenceNote         String?           @db.Text
+  evidenceUrl          String?           @db.VarChar(500) // optional Cloudinary URL
+
+  submittedAt DateTime  @default(now())
+  editedAt    DateTime?
+
+  moderationCases ModerationCase[]
+
+  @@unique([stateTradeEntryId, criterionId, assessorId])
+  @@index([criterionId])
+  @@index([assessorId])
+}
+
+// ============================================================================
+// AGGREGATED RESULTS — cached per stage, for fast/stable leaderboards
+// ============================================================================
+
+// One row = one sector's total for one state at one stage, OR one zone's
+// promoted entry at national stage. `stage` + `zoneId`/`stateId` together
+// disambiguate which "level" this row represents.
+model SectorResult {
+  id       String          @id @default(cuid()) @db.VarChar(36)
+  cycleId  String          @db.VarChar(36)
+  sectorId String          @db.VarChar(36)
+  sector   Sector          @relation(fields: [sectorId], references: [id])
+  stage    AssessmentStage
+
+  stateId String? @db.VarChar(36) // set when stage = State or Zonal (state's entry within its zone)
+  state   State?  @relation(fields: [stateId], references: [id])
+  zoneId  String? @db.VarChar(36) // set when stage = Zonal or National (zone's promoted entry)
+  zone    Zone?   @relation(fields: [zoneId], references: [id])
+
+  // Non-null composite of (stateId, zoneId) used ONLY for uniqueness.
+  // Same MySQL NULL-uniqueness issue as CriterionLock/UserRole above:
+  // at State stage zoneId is null, at National stage stateId is null,
+  // and MySQL's unique index treats every NULL as distinct — so relying
+  // on @@unique([..., stateId, zoneId]) directly would silently allow
+  // duplicate rows at those stages. Always set to `${stateId ?? "NONE"}:${zoneId ?? "NONE"}`
+  // when creating/updating a row.
+  locationScopeKey String @default("NONE:NONE") @db.VarChar(80)
+
+  sectorTotal Decimal @db.Decimal(10, 2) // sum of the 3 StateTradeEntry totals
+  rank        Int? // computed rank within this (cycle, sector, stage) group
+  isPromoted  Boolean @default(false) // true if this is one of the top 3 advancing
+
+  promotions   Promotion[]
+  awardResults AwardResult[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cycleId, sectorId, stage, locationScopeKey])
+  @@index([cycleId, sectorId, stage])
+}
+
+// Records every promotion event — which SectorResult advanced, from which
+// stage to which, when, and by whom. Keeps the "top to last, fully
+// transparent" trail auditable, not just the live SectorResult snapshot.
+model Promotion {
+  id             String           @id @default(cuid()) @db.VarChar(36)
+  cycleId        String           @db.VarChar(36)
+  cycle          CompetitionCycle @relation(fields: [cycleId], references: [id])
+  sectorResultId String           @db.VarChar(36)
+  sectorResult   SectorResult     @relation(fields: [sectorResultId], references: [id])
+  fromStage      AssessmentStage
+  toStage        AssessmentStage
+  promotedById   String           @db.VarChar(36)
+  promotedBy     User             @relation("PromotionActor", fields: [promotedById], references: [id])
+  promotedAt     DateTime         @default(now())
+
+  @@index([cycleId])
+  @@index([sectorResultId])
+}
+
+// ============================================================================
+// MODERATION
+// ============================================================================
+
+model ModerationCase {
+  id         String               @id @default(cuid()) @db.VarChar(36)
+  scoreId    String?              @db.VarChar(36) // the specific score being challenged, if applicable
+  score      Score?               @relation(fields: [scoreId], references: [id])
+  raisedById String               @db.VarChar(36)
+  raisedBy   User                 @relation("ModerationRaisedBy", fields: [raisedById], references: [id])
+  reason     String               @db.Text
+  status     ModerationCaseStatus @default(Open)
+
+  moderatorId String? @db.VarChar(36)
+  moderator   User?   @relation("ModeratorActor", fields: [moderatorId], references: [id])
+  resolution  String? @db.Text
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([status])
+}
+
+// ============================================================================
+// AWARD CATEGORIES (admin-managed, mapped only at national stage)
+// ============================================================================
+
+model AwardCategory {
+  id               String          @id @default(cuid()) @db.VarChar(36)
+  name             String          @unique @db.VarChar(255)
+  description      String?         @db.Text
+  requiredEntityType AwardEntityType
+  active           Boolean         @default(true)
+
+  results AwardResult[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AwardResult {
+  id              String           @id @default(cuid()) @db.VarChar(36)
+  cycleId         String           @db.VarChar(36)
+  cycle           CompetitionCycle @relation(fields: [cycleId], references: [id])
+  awardCategoryId String           @db.VarChar(36)
+  awardCategory   AwardCategory    @relation(fields: [awardCategoryId], references: [id])
+  sectorResultId  String           @db.VarChar(36) // the winning national SectorResult this maps to
+  sectorResult    SectorResult     @relation(fields: [sectorResultId], references: [id])
+  assignedById    String           @db.VarChar(36) // national admin who made the manual mapping
+  assignedBy      User             @relation("AwardAssignedBy", fields: [assignedById], references: [id])
+  assignedAt      DateTime         @default(now())
+
+  @@unique([cycleId, awardCategoryId])
+  @@index([sectorResultId])
+}
+
+// ============================================================================
+// MESSAGING — direct 1-to-1 threads and targeted/broadcast announcements.
+// Distinct from Notification: a Notification is a system-generated alert
+// about something that happened (a score, a promotion); a Message is a
+// person writing to another person (or a targeted group) directly.
+// Sending a message ALSO creates a Notification (type NEW_MESSAGE) for
+// each recipient, so the bell and the inbox stay in sync — see the
+// messaging service, not modeled here in the schema.
+// ============================================================================
+
+model Conversation {
+  id      String           @id @default(cuid()) @db.VarChar(36)
+  kind    ConversationKind
+  subject String?          @db.VarChar(255) // optional title, mainly useful for broadcasts
+
+  // Set only for Broadcast conversations — records what audience was
+  // targeted, for filtering/audit ("show me everything I broadcast to
+  // Zonal_Assessors last month").
+  broadcastTargetType BroadcastTargetType?
+  broadcastTargetRole UserType? // used when targetType = Specific_Role or Specific_Role_In_Zone
+  broadcastTargetZoneId String? @db.VarChar(36)
+  broadcastTargetZone   Zone?  @relation("BroadcastTargetZone", fields: [broadcastTargetZoneId], references: [id])
+
+  // The conversation that this one is a reply-thread off of, if it
+  // originated as a reply to a broadcast. A broadcast reply becomes its
+  // own Direct conversation between the replier and the original sender,
+  // linked back here — it does NOT fan out to the whole original audience.
+  parentBroadcastId String?       @db.VarChar(36)
+  parentBroadcast   Conversation? @relation("BroadcastReplies", fields: [parentBroadcastId], references: [id])
+  replies           Conversation[] @relation("BroadcastReplies")
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([broadcastTargetZoneId])
+  @@index([parentBroadcastId])
+}
+
+// Everyone with visibility into a conversation. For a Direct conversation
+// this is exactly 2 rows. For a Broadcast, this is every resolved
+// recipient at send time (resolving "all Zonal_Assessors in Zone X" into
+// actual user rows so the audience is fixed even if roles change later).
+model ConversationParticipant {
+  id             String       @id @default(cuid()) @db.VarChar(36)
+  conversationId String       @db.VarChar(36)
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  userId         String       @db.VarChar(36)
+  user           User         @relation("ConversationParticipant", fields: [userId], references: [id])
+
+  lastReadAt DateTime? // drives unread-thread count, distinct from per-message Notification.readAt
+  joinedAt   DateTime  @default(now())
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String       @id @default(cuid()) @db.VarChar(36)
+  conversationId String       @db.VarChar(36)
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  senderId       String       @db.VarChar(36)
+  sender         User         @relation("MessageSender", fields: [senderId], references: [id])
+  body           String       @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+}
+
+// ============================================================================
+// NOTIFICATIONS — push alerts with deep links, plus the audit trail above
+// powers the "pull" activity feed for admins overseeing their scope.
+// ============================================================================
+
+model Notification {
+  id          String               @id @default(cuid()) @db.VarChar(36)
+  recipientId String               @db.VarChar(36)
+  recipient   User                 @relation("NotificationRecipient", fields: [recipientId], references: [id])
+  type        NotificationType
+  title       String               @db.VarChar(255)
+  body        String               @db.Text
+
+  // Deep-link target. The frontend resolves (linkType, linkId) into the
+  // correct route so clicking a notification lands exactly on the
+  // assignment, score, moderation case, etc. it refers to — not just a
+  // generic "go check your dashboard".
+  linkType NotificationLinkType?
+  linkId   String?               @db.VarChar(36)
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([recipientId, readAt])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// AUDIT LOG — append-only, for accountability
+// ============================================================================
+
+model AuditLog {
+  id        String      @id @default(cuid()) @db.VarChar(36)
+  actorId   String      @db.VarChar(36)
+  actor     User        @relation("AuditActor", fields: [actorId], references: [id])
+  action    AuditAction
+  // Free-form JSON snapshot of what changed (before/after, target ids,
+  // etc.) — kept as a string for MySQL compatibility without requiring
+  // JSON column features that vary by MySQL version.
+  metadata  String      @db.Text
+  createdAt DateTime    @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt])
+}

@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #1d293d;
+
+  /* Nigeria Skills Expo brand tokens — keep in sync with src/lib/theme/brand.ts */
+  --color-primary: #aa1d3f;
+  --color-primary-accent: #f8eaeb;
+  --color-secondary: #f9a825;
+  --color-ink: #1d293d;
+  --color-grey: #ededf0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--color-primary);
+  --color-primary-accent: var(--color-primary-accent);
+  --color-secondary: var(--color-secondary);
+  --color-ink: var(--color-ink);
+  --color-grey: var(--color-grey);
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body), Arial, Helvetica, sans-serif;
+}
+
+h1, h2, h3, h4, .font-display {
+  font-family: var(--font-display), var(--font-body), sans-serif;
+}
