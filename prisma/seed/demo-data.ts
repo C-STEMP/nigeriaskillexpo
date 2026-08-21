@@ -57,7 +57,7 @@ const prisma = new PrismaClient();
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-const DEMO_PASSWORD = "Demo@12345"; // every demo account uses this password
+const DEMO_PASSWORD = "Test@123"; // every demo account uses this password
 let demoPasswordHash: string;
 
 const FIRST_NAMES = [
@@ -85,7 +85,7 @@ function randomName() {
 let emailCounter = 0;
 function uniqueEmail(prefix: string) {
   emailCounter += 1;
-  return `${prefix}.${emailCounter}@demo.elimiexpo.test`;
+  return `${prefix}.${emailCounter}@skillexpo.com`;
 }
 
 // Realistic-ish score generator: returns a score biased around a "skill

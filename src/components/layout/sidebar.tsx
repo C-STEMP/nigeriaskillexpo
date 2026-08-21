@@ -9,7 +9,7 @@ import type { NavItem } from "./nav-config";
 const siderStyle: React.CSSProperties = {
   overflow: 'auto',
   height: '100vh',
-  position: 'fixed',
+  position: 'sticky',
   insetInlineStart: 0,
   top: 0,
   bottom: 0,
